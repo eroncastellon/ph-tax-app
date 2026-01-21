@@ -1,0 +1,465 @@
+// Philippine Tax Guidance App - Prisma Schema
+// This schema supports Phase 1: Freelancers, Self-Employed, Micro/Small Businesses (Non-VAT), Mixed Income
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USER & AUTHENTICATION
+// ============================================================================
+
+model User {
+  id             String    @id @default(uuid())
+  email          String    @unique
+  passwordHash   String    @map("password_hash")
+  firstName      String?   @map("first_name")
+  lastName       String?   @map("last_name")
+  isEmailVerified Boolean  @default(false) @map("is_email_verified")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  taxProfiles    TaxProfile[]
+  sessions       UserSession[]
+
+  @@map("users")
+}
+
+model UserSession {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  refreshToken String   @map("refresh_token")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_sessions")
+}
+
+// ============================================================================
+// TAX PROFILE - Per Tax Year Configuration
+// ============================================================================
+
+enum UserType {
+  FREELANCER           // Pure freelancer / professional
+  SELF_EMPLOYED        // Sole proprietor with business
+  MICRO_SMALL_BUSINESS // Non-VAT registered business
+  MIXED_INCOME         // Employment + freelance/business income
+}
+
+enum RegistrationStatus {
+  NOT_REGISTERED       // Not yet registered with BIR
+  PENDING_REGISTRATION // In process of registering
+  REGISTERED           // Fully registered
+  NEEDS_UPDATE         // Registration needs updating (e.g., change of RDO)
+}
+
+enum TaxRegime {
+  GRADUATED_RATES      // 8% above 250K threshold OR graduated rates with deductions
+  EIGHT_PERCENT_FLAT   // 8% flat on gross receipts (for eligible taxpayers)
+  UNDETERMINED         // Not yet determined - needs assessment
+}
+
+model TaxProfile {
+  id                  String             @id @default(uuid())
+  userId              String             @map("user_id")
+  taxYear             Int                @map("tax_year")
+
+  // User Classification
+  userType            UserType           @map("user_type")
+  registrationStatus  RegistrationStatus @default(NOT_REGISTERED) @map("registration_status")
+
+  // BIR Registration Details
+  tin                 String?            // Tax Identification Number (format: XXX-XXX-XXX-XXX)
+  rdo                 String?            // Revenue District Office code
+  rdoName             String?            @map("rdo_name")
+  dateRegistered      DateTime?          @map("date_registered")
+
+  // Business Details (for self-employed/business)
+  businessName        String?            @map("business_name")
+  businessAddress     String?            @map("business_address")
+  businessType        String?            @map("business_type") // Line of business
+
+  // Employment Details (for mixed income)
+  hasEmploymentIncome Boolean            @default(false) @map("has_employment_income")
+  employerName        String?            @map("employer_name")
+  employerTin         String?            @map("employer_tin")
+
+  // Tax Regime Selection
+  selectedRegime      TaxRegime          @default(UNDETERMINED) @map("selected_regime")
+  regimeLockedAt      DateTime?          @map("regime_locked_at") // Once selected for the year
+
+  // Metadata
+  isComplete          Boolean            @default(false) @map("is_complete")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  // Relations
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  incomeStreams       IncomeStream[]
+  expenses            ExpenseItem[]
+  assessmentResults   AssessmentResult[]
+
+  @@unique([userId, taxYear])
+  @@index([userId])
+  @@index([taxYear])
+  @@map("tax_profiles")
+}
+
+// ============================================================================
+// INCOME STREAMS
+// ============================================================================
+
+enum IncomeType {
+  FREELANCE_SERVICE      // Professional fees, consulting
+  BUSINESS_SALES         // Sales from business operations
+  EMPLOYMENT             // Compensation income (for mixed income)
+  RENTAL                 // Rental income
+  ROYALTIES              // Royalties, commissions
+  OTHER                  // Other income sources
+}
+
+enum IncomeFrequency {
+  ONE_TIME               // Single payment
+  MONTHLY                // Regular monthly
+  QUARTERLY              // Every 3 months
+  ANNUAL                 // Once a year
+  IRREGULAR              // Irregular/project-based
+}
+
+model IncomeStream {
+  id                  String          @id @default(uuid())
+  taxProfileId        String          @map("tax_profile_id")
+
+  // Income Classification
+  incomeType          IncomeType      @map("income_type")
+  description         String?         // Description of income source
+  clientName          String?         @map("client_name") // For freelance/business
+
+  // Amount Details
+  grossAmount         Decimal         @map("gross_amount") @db.Decimal(15, 2)
+  frequency           IncomeFrequency @default(ONE_TIME)
+  periodStart         DateTime?       @map("period_start")
+  periodEnd           DateTime?       @map("period_end")
+
+  // Withholding Tax Details
+  hasWithholding      Boolean         @default(false) @map("has_withholding")
+  withheldAmount      Decimal?        @map("withheld_amount") @db.Decimal(15, 2)
+  withholdingRate     Decimal?        @map("withholding_rate") @db.Decimal(5, 4) // e.g., 0.0500 for 5%
+
+  // [CPA VALIDATION REQUIRED] BIR form 2307 tracking
+  form2307Received    Boolean         @default(false) @map("form_2307_received")
+  form2307Reference   String?         @map("form_2307_reference")
+
+  // Metadata
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  taxProfile          TaxProfile      @relation(fields: [taxProfileId], references: [id], onDelete: Cascade)
+
+  @@index([taxProfileId])
+  @@index([incomeType])
+  @@map("income_streams")
+}
+
+// ============================================================================
+// EXPENSE ITEMS
+// ============================================================================
+
+enum ExpenseCategory {
+  // [CPA VALIDATION REQUIRED] These categories should be validated against BIR allowable deductions
+  RENT                    // Office/business space rent
+  UTILITIES               // Electricity, water, internet
+  SUPPLIES                // Office supplies, materials
+  PROFESSIONAL_FEES       // Fees paid to other professionals
+  TRANSPORTATION          // Travel, fuel, transportation
+  COMMUNICATION           // Phone, internet for business
+  DEPRECIATION            // Asset depreciation
+  SALARIES_WAGES          // Employee salaries (if applicable)
+  TAXES_LICENSES          // Business taxes and licenses
+  INSURANCE               // Business insurance
+  INTEREST_EXPENSE        // Interest on business loans
+  REPAIRS_MAINTENANCE     // Repairs and maintenance
+  ADVERTISING             // Marketing and advertising
+  BAD_DEBTS               // [CPA VALIDATION REQUIRED] Bad debts write-off
+  OTHER_DEDUCTIBLE        // Other deductible expenses
+}
+
+model ExpenseItem {
+  id                  String          @id @default(uuid())
+  taxProfileId        String          @map("tax_profile_id")
+
+  // Expense Details
+  category            ExpenseCategory
+  description         String
+  amount              Decimal         @db.Decimal(15, 2)
+  dateIncurred        DateTime        @map("date_incurred")
+
+  // Documentation
+  hasReceipt          Boolean         @default(false) @map("has_receipt")
+  receiptReference    String?         @map("receipt_reference")
+  vendorName          String?         @map("vendor_name")
+  vendorTin           String?         @map("vendor_tin")
+
+  // [CPA VALIDATION REQUIRED] Deductibility flags
+  isDeductible        Boolean         @default(true) @map("is_deductible")
+  deductibilityNote   String?         @map("deductibility_note")
+
+  // Metadata
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  taxProfile          TaxProfile      @relation(fields: [taxProfileId], references: [id], onDelete: Cascade)
+
+  @@index([taxProfileId])
+  @@index([category])
+  @@map("expense_items")
+}
+
+// ============================================================================
+// ASSESSMENT RESULTS - Engine Output
+// ============================================================================
+
+enum RiskLevel {
+  NONE                // No concerns
+  INFO                // Informational note
+  WARNING             // User should review
+  CPA_REVIEW_REQUIRED // Must consult CPA before proceeding
+}
+
+model AssessmentResult {
+  id                  String       @id @default(uuid())
+  taxProfileId        String       @map("tax_profile_id")
+
+  // Assessment Version
+  version             Int          @default(1)
+  rulesEngineVersion  String       @map("rules_engine_version") // Track which rules version
+  assessedAt          DateTime     @default(now()) @map("assessed_at")
+
+  // Regime Determination
+  recommendedRegime   TaxRegime    @map("recommended_regime")
+  regimeComparison    Json         @map("regime_comparison") // Comparison of both regimes
+
+  // Computed Values (Form-Ready Placeholders)
+  computedValues      Json         @map("computed_values")
+  // Structure:
+  // {
+  //   grossIncome: number,
+  //   totalDeductions: number,
+  //   taxableIncome: number,
+  //   estimatedTax: number,
+  //   creditsApplied: number,
+  //   netTaxPayable: number,
+  //   quarterlyPayments: { q1: number, q2: number, q3: number, q4: number }
+  // }
+
+  // Obligations - What forms/filings apply
+  obligations         Json
+  // Structure: Array of Obligation objects
+  // {
+  //   formCode: string (e.g., "1701Q", "2551Q"),
+  //   formName: string,
+  //   description: string,
+  //   frequency: "quarterly" | "annual" | "monthly",
+  //   ruleModuleId: string,
+  //   isApplicable: boolean,
+  //   notes: string
+  // }
+
+  // Deadlines - Calendar items
+  deadlines           Json
+  // Structure: Array of Deadline objects
+  // {
+  //   obligationId: string,
+  //   formCode: string,
+  //   description: string,
+  //   dueDate: string (ISO date),
+  //   period: string (e.g., "Q1 2024"),
+  //   reminderDays: number[],
+  //   penaltyInfo: string
+  // }
+
+  // Risk Flags
+  riskFlags           Json         @map("risk_flags")
+  // Structure: Array of RiskFlag objects
+  // {
+  //   id: string,
+  //   level: RiskLevel,
+  //   code: string,
+  //   title: string,
+  //   description: string,
+  //   ruleModuleId: string,
+  //   recommendedAction: string,
+  //   affectedFields: string[]
+  // }
+
+  // Reasoning Receipt - Full audit trail
+  reasoningReceipt    Json         @map("reasoning_receipt")
+  // Structure:
+  // {
+  //   steps: Array<{
+  //     stepNumber: number,
+  //     ruleModuleId: string,
+  //     ruleModuleVersion: string,
+  //     input: object,
+  //     output: object,
+  //     explanation: string
+  //   }>,
+  //   explanationIds: string[], // IDs for AI layer to reference
+  //   completeness: { score: number, missingFields: string[] }
+  // }
+
+  // Status
+  isStale             Boolean      @default(false) @map("is_stale") // True if inputs changed
+  supersededBy        String?      @map("superseded_by") // ID of newer assessment
+
+  // Metadata
+  createdAt           DateTime     @default(now()) @map("created_at")
+
+  // Relations
+  taxProfile          TaxProfile   @relation(fields: [taxProfileId], references: [id], onDelete: Cascade)
+
+  @@index([taxProfileId])
+  @@index([assessedAt])
+  @@map("assessment_results")
+}
+
+// ============================================================================
+// RULE MODULES - Versioned Tax Rules
+// ============================================================================
+
+enum RuleCategory {
+  REGIME_DETERMINATION   // 8% vs Graduated rates determination
+  INCOME_CLASSIFICATION  // How to classify different income types
+  DEDUCTION_RULES        // What can be deducted
+  FILING_OBLIGATION      // What forms to file
+  DEADLINE_CALCULATION   // When things are due
+  PENALTY_RULES          // Late filing/payment penalties
+  WITHHOLDING_RULES      // Creditable withholding tax rules
+}
+
+model RuleModule {
+  id                  String       @id @default(uuid())
+
+  // Identification
+  code                String       // e.g., "REGIME_8PCT_ELIGIBILITY"
+  version             String       // Semantic version: "1.0.0"
+
+  // Description
+  title               String       // Human-readable title
+  description         String       // What this rule determines
+  category            RuleCategory
+
+  // Legal Basis [CPA VALIDATION REQUIRED]
+  legalBasis          Json         @map("legal_basis")
+  // Structure:
+  // {
+  //   laws: string[],           // e.g., ["NIRC Section 24", "RR No. 8-2018"]
+  //   effectiveDate: string,    // When this rule became effective
+  //   expirationDate?: string,  // If rule has sunset
+  //   cpaValidated: boolean,
+  //   validatedAt?: string,
+  //   validatedBy?: string,
+  //   validationNotes?: string
+  // }
+
+  // Plain Language Explanation (for AI layer to use)
+  plainLanguage       Json         @map("plain_language")
+  // Structure:
+  // {
+  //   summary: string,          // One-paragraph explanation
+  //   forBeginners: string,     // Extra simple explanation
+  //   examples: Array<{ scenario: string, outcome: string }>,
+  //   commonMistakes: string[],
+  //   relatedRules: string[]    // IDs of related rule modules
+  // }
+
+  // Rule Logic [CPA VALIDATION REQUIRED]
+  // This is a JSON representation of the rule, NOT executable code
+  // The rules engine interprets this deterministically
+  ruleDefinition      Json         @map("rule_definition")
+  // Structure varies by category. Example for REGIME_DETERMINATION:
+  // {
+  //   conditions: [
+  //     { field: "userType", operator: "in", value: ["FREELANCER", "SELF_EMPLOYED"] },
+  //     { field: "grossReceipts", operator: "<=", value: 3000000 },
+  //     { field: "hasEmploymentIncome", operator: "==", value: false }
+  //   ],
+  //   output: {
+  //     eligible8Percent: true,
+  //     thresholdAmount: 250000,
+  //     taxRate: 0.08
+  //   }
+  // }
+
+  // Thresholds and Values [CPA VALIDATION REQUIRED]
+  // Extracted for easy updating when tax rules change
+  thresholds          Json
+  // Structure:
+  // {
+  //   "VAT_THRESHOLD": 3000000,
+  //   "EIGHT_PERCENT_GROSS_LIMIT": 3000000,
+  //   "PERSONAL_EXEMPTION": 250000,
+  //   "QUARTER_1_DEADLINE_MONTH": 5,
+  //   "QUARTER_1_DEADLINE_DAY": 15
+  // }
+
+  // Status
+  isActive            Boolean      @default(true) @map("is_active")
+  isDeprecated        Boolean      @default(false) @map("is_deprecated")
+  deprecatedReason    String?      @map("deprecated_reason")
+  replacedBy          String?      @map("replaced_by") // ID of replacement rule
+
+  // Audit
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @updatedAt @map("updated_at")
+  createdBy           String?      @map("created_by")
+  lastReviewedAt      DateTime?    @map("last_reviewed_at")
+  lastReviewedBy      String?      @map("last_reviewed_by")
+
+  @@unique([code, version])
+  @@index([code])
+  @@index([category])
+  @@index([isActive])
+  @@map("rule_modules")
+}
+
+// ============================================================================
+// AI EXPLANATION REQUESTS - Audit Trail for AI Layer
+// ============================================================================
+
+model AIExplanationRequest {
+  id                  String    @id @default(uuid())
+  userId              String    @map("user_id")
+  assessmentId        String?   @map("assessment_id")
+
+  // Request Details
+  requestType         String    @map("request_type") // "explain_rule" | "clarifying_question" | "summarize_reasoning"
+  ruleModuleId        String?   @map("rule_module_id")
+  contextData         Json      @map("context_data") // What data was provided to AI
+
+  // Response
+  aiResponse          String    @map("ai_response")
+  responseTokens      Int?      @map("response_tokens")
+
+  // Important: AI layer constraints
+  // The AI response CANNOT modify any computed values
+  didModifyOutcome    Boolean   @default(false) @map("did_modify_outcome") // Should always be false
+
+  // Metadata
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([assessmentId])
+  @@map("ai_explanation_requests")
+}
